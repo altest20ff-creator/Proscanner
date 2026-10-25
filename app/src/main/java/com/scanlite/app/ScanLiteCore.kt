@@ -50,7 +50,8 @@ object BitmapSizing {
         }
 
         val scale =
-            maxDimension.toFloat() / largestDimension.toFloat()
+            maxDimension.toFloat() /
+                largestDimension.toFloat()
 
         val targetWidth =
             (source.width * scale)
