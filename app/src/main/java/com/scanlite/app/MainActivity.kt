@@ -138,7 +138,9 @@ private fun ScanLiteApp() {
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
+    val snackbarHostState = remember {
+        SnackbarHostState()
+    }
 
     val importLauncher =
         rememberLauncherForActivityResult(
@@ -180,14 +182,14 @@ private fun ScanLiteApp() {
 
             coroutineScope.launch {
                 runCatching {
-                    val outputStream =
+                    val output =
                         context.contentResolver.openOutputStream(uri)
                             ?: error("Unable to open the selected destination")
 
-                    outputStream.use { output ->
+                    output.use { outputStream ->
                         PdfWriter.write(
                             pages = pages,
-                            output = output,
+                            output = outputStream,
                             filter = filter,
                             quality = quality
                         )
@@ -199,7 +201,9 @@ private fun ScanLiteApp() {
                     )
                 }.onFailure { error ->
                     snackbarHostState.showSnackbar(
-                        message = "Export failed: ${error.message ?: "unknown error"}"
+                        message = "Export failed: ${
+                            error.message ?: "unknown error"
+                        }"
                     )
                 }
             }
@@ -286,7 +290,9 @@ private fun ScanLiteApp() {
                             screen = "camera"
                         },
                         onImport = {
-                            importLauncher.launch(arrayOf("image/*"))
+                            importLauncher.launch(
+                                arrayOf("image/*")
+                            )
                         },
                         onPages = {
                             if (pages.isNotEmpty()) {
@@ -335,7 +341,9 @@ private fun HomeScreen(
                 contentDescription = null
             )
 
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(
+                modifier = Modifier.width(8.dp)
+            )
 
             Text(text = "Scan document")
         }
@@ -351,7 +359,9 @@ private fun HomeScreen(
                 contentDescription = null
             )
 
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(
+                modifier = Modifier.width(8.dp)
+            )
 
             Text(text = "Import images")
         }
@@ -379,7 +389,9 @@ private fun HomeScreen(
                         contentDescription = null
                     )
 
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(
+                        modifier = Modifier.width(12.dp)
+                    )
 
                     Text(
                         text = "${pages.size} page(s) ready to edit and export"
@@ -453,23 +465,24 @@ private fun CameraScreen(
 
     LaunchedEffect(Unit) {
         if (!hasCameraPermission) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
+            permissionLauncher.launch(
+                Manifest.permission.CAMERA
+            )
         }
     }
 
     DisposableEffect(
-        key1 = hasCameraPermission,
-        key2 = lifecycleOwner
+        hasCameraPermission,
+        lifecycleOwner
     ) {
         if (hasCameraPermission) {
-            val cameraProviderFuture =
+            val providerFuture =
                 ProcessCameraProvider.getInstance(context)
 
-            cameraProviderFuture.addListener(
+            providerFuture.addListener(
                 {
                     runCatching {
-                        val cameraProvider =
-                            cameraProviderFuture.get()
+                        val provider = providerFuture.get()
 
                         val preview =
                             Preview.Builder()
@@ -487,10 +500,10 @@ private fun CameraScreen(
                                 )
                                 .build()
 
-                        cameraProvider.unbindAll()
+                        provider.unbindAll()
 
                         val boundCamera =
-                            cameraProvider.bindToLifecycle(
+                            provider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
                                 preview,
@@ -551,7 +564,9 @@ private fun CameraScreen(
                     color = MaterialTheme.colorScheme.onPrimary
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(
+                    modifier = Modifier.height(12.dp)
+                )
 
                 Button(
                     onClick = {
@@ -602,9 +617,10 @@ private fun CameraScreen(
             IconButton(
                 onClick = {
                     torchEnabled = !torchEnabled
-                    camera?.cameraControl?.enableTorch(torchEnabled)
-                },
-                enabled = camera != null
+                    camera?.cameraControl?.enableTorch(
+                        torchEnabled
+                    )
+                }
             ) {
                 Icon(
                     imageVector = if (torchEnabled) {
@@ -620,13 +636,16 @@ private fun CameraScreen(
 
         FloatingActionButton(
             onClick = {
-                capturePhoto(
-                    context = context,
-                    capture = imageCapture,
-                    onCaptured = onCaptured
-                )
+                val capture = imageCapture
+
+                if (capture != null) {
+                    capturePhoto(
+                        context = context,
+                        capture = capture,
+                        onCaptured = onCaptured
+                    )
+                }
             },
-            enabled = imageCapture != null,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(28.dp)
@@ -641,13 +660,9 @@ private fun CameraScreen(
 
 private fun capturePhoto(
     context: Context,
-    capture: ImageCapture?,
+    capture: ImageCapture,
     onCaptured: (Bitmap) -> Unit
 ) {
-    if (capture == null) {
-        return
-    }
-
     val targetFile =
         runCatching {
             File.createTempFile(
@@ -658,8 +673,9 @@ private fun capturePhoto(
         }.getOrNull() ?: return
 
     val outputOptions =
-        ImageCapture.OutputFileOptions.Builder(targetFile)
-            .build()
+        ImageCapture.OutputFileOptions.Builder(
+            targetFile
+        ).build()
 
     capture.takePicture(
         outputOptions,
@@ -675,16 +691,19 @@ private fun capturePhoto(
             override fun onImageSaved(
                 outputFileResults: ImageCapture.OutputFileResults
             ) {
-                runCatching {
-                    decodeFileSafely(
-                        file = targetFile,
-                        maxDimension = Quality.BALANCED.maxDimension
-                    )
-                }.getOrNull()?.let { bitmap ->
-                    onCaptured(bitmap)
-                }
+                try {
+                    val bitmap =
+                        decodeFileSafely(
+                            file = targetFile,
+                            maxDimension = Quality.BALANCED.maxDimension
+                        )
 
-                targetFile.delete()
+                    if (bitmap != null && !bitmap.isRecycled) {
+                        onCaptured(bitmap)
+                    }
+                } finally {
+                    targetFile.delete()
+                }
             }
         }
     )
@@ -741,7 +760,9 @@ private fun PageManager(
                     contentDescription = null
                 )
 
-                Spacer(modifier = Modifier.width(4.dp))
+                Spacer(
+                    modifier = Modifier.width(4.dp)
+                )
 
                 Text(text = "Export")
             }
@@ -775,10 +796,12 @@ private fun PageManager(
                             modifier = Modifier.size(88.dp, 116.dp)
                         )
 
-                        Spacer(modifier = Modifier.width(10.dp))
+                        Spacer(
+                            modifier = Modifier.width(8.dp)
+                        )
 
                         Column(
-                            modifier = Modifier.width(110.dp)
+                            modifier = Modifier.width(100.dp)
                         ) {
                             Text(
                                 text = "Page ${index + 1}",
@@ -846,7 +869,7 @@ private fun PageManager(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            FilterMode.entries.forEach { mode ->
+            FilterMode.values().forEach { mode ->
                 FilterChip(
                     selected = filter == mode,
                     onClick = {
@@ -872,14 +895,16 @@ private fun PageManager(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Quality.entries.forEach { selectedQuality ->
+            Quality.values().forEach { selectedQuality ->
                 FilterChip(
                     selected = quality == selectedQuality,
                     onClick = {
                         onQuality(selectedQuality)
                     },
                     label = {
-                        Text(text = selectedQuality.name)
+                        Text(
+                            text = selectedQuality.name
+                        )
                     }
                 )
             }
@@ -907,9 +932,10 @@ private fun decodeBitmapSafely(
     maxDimension: Int
 ): Bitmap? {
     return runCatching {
-        val bounds = BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
-        }
+        val bounds =
+            BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
 
         resolver.openInputStream(uri)?.use { inputStream ->
             BitmapFactory.decodeStream(
@@ -923,16 +949,18 @@ private fun decodeBitmapSafely(
             return@runCatching null
         }
 
-        val sampleSize = calculateSampleSize(
-            width = bounds.outWidth,
-            height = bounds.outHeight,
-            maxDimension = maxDimension
-        )
+        val sampleSize =
+            calculateSampleSize(
+                width = bounds.outWidth,
+                height = bounds.outHeight,
+                maxDimension = maxDimension
+            )
 
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-            inPreferredConfig = Bitmap.Config.RGB_565
-        }
+        val options =
+            BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
 
         resolver.openInputStream(uri)?.use { inputStream ->
             BitmapFactory.decodeStream(
@@ -949,9 +977,10 @@ private fun decodeFileSafely(
     maxDimension: Int
 ): Bitmap? {
     return runCatching {
-        val bounds = BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
-        }
+        val bounds =
+            BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
 
         BitmapFactory.decodeFile(
             file.absolutePath,
@@ -962,16 +991,18 @@ private fun decodeFileSafely(
             return@runCatching null
         }
 
-        val sampleSize = calculateSampleSize(
-            width = bounds.outWidth,
-            height = bounds.outHeight,
-            maxDimension = maxDimension
-        )
+        val sampleSize =
+            calculateSampleSize(
+                width = bounds.outWidth,
+                height = bounds.outHeight,
+                maxDimension = maxDimension
+            )
 
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-            inPreferredConfig = Bitmap.Config.RGB_565
-        }
+        val options =
+            BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
 
         BitmapFactory.decodeFile(
             file.absolutePath,
@@ -1157,7 +1188,8 @@ private object PdfWriter {
                         )
                         .create()
 
-                val page = document.startPage(pageInfo)
+                val page =
+                    document.startPage(pageInfo)
 
                 page.canvas.drawColor(Color.WHITE)
 
@@ -1200,16 +1232,16 @@ private object PdfWriter {
                 document.finishPage(page)
 
                 if (
-                    !processedBitmap.isRecycled &&
-                    processedBitmap !== originalBitmap
+                    processedBitmap !== originalBitmap &&
+                    !processedBitmap.isRecycled
                 ) {
                     processedBitmap.recycle()
                 }
 
                 if (
-                    !filteredBitmap.isRecycled &&
+                    filteredBitmap !== originalBitmap &&
                     filteredBitmap !== processedBitmap &&
-                    filteredBitmap !== originalBitmap
+                    !filteredBitmap.isRecycled
                 ) {
                     filteredBitmap.recycle()
                 }
