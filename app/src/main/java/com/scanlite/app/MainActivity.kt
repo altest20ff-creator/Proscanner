@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -74,6 +75,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -143,11 +145,15 @@ private fun ScanLiteApp() {
             contract = ActivityResultContracts.OpenMultipleDocuments()
         ) { uris ->
 
-            val loaded = uris.mapNotNull { uri ->
-                decodeBitmap(context.contentResolver, uri)
+            val importedPages = uris.mapNotNull { uri ->
+                decodeBitmapSafely(
+                    resolver = context.contentResolver,
+                    uri = uri,
+                    maxDimension = Quality.BALANCED.maxDimension
+                )
             }
 
-            if (loaded.isEmpty() && uris.isNotEmpty()) {
+            if (uris.isNotEmpty() && importedPages.isEmpty()) {
                 coroutineScope.launch {
                     snackbarHostState.showSnackbar(
                         message = "Could not read the selected images"
@@ -155,8 +161,8 @@ private fun ScanLiteApp() {
                 }
             }
 
-            if (loaded.isNotEmpty()) {
-                pages = pages + loaded
+            if (importedPages.isNotEmpty()) {
+                pages = pages + importedPages
                 screen = "pages"
             }
         }
@@ -384,7 +390,7 @@ private fun HomeScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    .height(180.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -405,6 +411,15 @@ private fun CameraScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
     var imageCapture by remember {
         mutableStateOf<ImageCapture?>(null)
     }
@@ -421,24 +436,90 @@ private fun CameraScreen(
         mutableStateOf<String?>(null)
     }
 
+    val previewView = remember {
+        PreviewView(context)
+    }
+
     val permissionLauncher =
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.RequestPermission()
         ) { granted ->
+            hasCameraPermission = granted
+
             if (!granted) {
                 cameraError = "Camera permission is required to scan."
             }
         }
 
     LaunchedEffect(Unit) {
-        val permissionGranted =
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
-
-        if (!permissionGranted) {
+        if (!hasCameraPermission) {
             permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    DisposableEffect(
+        key1 = hasCameraPermission,
+        key2 = lifecycleOwner
+    ) {
+        if (hasCameraPermission) {
+            val cameraProviderFuture =
+                ProcessCameraProvider.getInstance(context)
+
+            cameraProviderFuture.addListener(
+                {
+                    runCatching {
+                        val cameraProvider =
+                            cameraProviderFuture.get()
+
+                        val preview =
+                            Preview.Builder()
+                                .build()
+                                .also { previewUseCase ->
+                                    previewUseCase.setSurfaceProvider(
+                                        previewView.surfaceProvider
+                                    )
+                                }
+
+                        val capture =
+                            ImageCapture.Builder()
+                                .setCaptureMode(
+                                    ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                                )
+                                .build()
+
+                        cameraProvider.unbindAll()
+
+                        val boundCamera =
+                            cameraProvider.bindToLifecycle(
+                                lifecycleOwner,
+                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                preview,
+                                capture
+                            )
+
+                        imageCapture = capture
+                        camera = boundCamera
+                        cameraError = null
+                    }.onFailure {
+                        imageCapture = null
+                        camera = null
+                        cameraError = "Unable to start the camera."
+                    }
+                },
+                ContextCompat.getMainExecutor(context)
+            )
+        }
+
+        onDispose {
+            runCatching {
+                ProcessCameraProvider
+                    .getInstance(context)
+                    .get()
+                    .unbindAll()
+            }
+
+            imageCapture = null
+            camera = null
         }
     }
 
@@ -448,66 +529,16 @@ private fun CameraScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.scrim)
     ) {
-        AndroidView(
-            factory = { viewContext ->
-                PreviewView(viewContext)
-            },
-            modifier = Modifier.fillMaxSize()
-        ) { previewView ->
-
-            val hasCameraPermission =
-                ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.CAMERA
-                ) == PackageManager.PERMISSION_GRANTED
-
-            if (hasCameraPermission) {
-                val cameraProviderFuture =
-                    ProcessCameraProvider.getInstance(context)
-
-                cameraProviderFuture.addListener(
-                    {
-                        runCatching {
-                            val cameraProvider =
-                                cameraProviderFuture.get()
-
-                            val preview =
-                                Preview.Builder()
-                                    .build()
-                                    .also { previewUseCase ->
-                                        previewUseCase.setSurfaceProvider(
-                                            previewView.surfaceProvider
-                                        )
-                                    }
-
-                            val capture =
-                                ImageCapture.Builder()
-                                    .setCaptureMode(
-                                        ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
-                                    )
-                                    .build()
-
-                            imageCapture = capture
-
-                            cameraProvider.unbindAll()
-
-                            camera =
-                                cameraProvider.bindToLifecycle(
-                                    lifecycleOwner,
-                                    CameraSelector.DEFAULT_BACK_CAMERA,
-                                    preview,
-                                    capture
-                                )
-                        }.onFailure {
-                            cameraError = "Unable to start the camera."
-                        }
-                    },
-                    ContextCompat.getMainExecutor(context)
-                )
-            }
+        if (hasCameraPermission) {
+            AndroidView(
+                factory = {
+                    previewView
+                },
+                modifier = Modifier.fillMaxSize()
+            )
         }
 
-        if (cameraError != null) {
+        if (!hasCameraPermission || cameraError != null) {
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -515,7 +546,8 @@ private fun CameraScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = cameraError.orEmpty(),
+                    text = cameraError
+                        ?: "Camera permission is required to scan.",
                     color = MaterialTheme.colorScheme.onPrimary
                 )
 
@@ -523,15 +555,29 @@ private fun CameraScreen(
 
                 Button(
                     onClick = {
-                        context.startActivity(
-                            Intent(
-                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.parse("package:${context.packageName}")
+                        if (!hasCameraPermission) {
+                            permissionLauncher.launch(
+                                Manifest.permission.CAMERA
                             )
-                        )
+                        } else {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.parse(
+                                        "package:${context.packageName}"
+                                    )
+                                )
+                            )
+                        }
                     }
                 ) {
-                    Text(text = "Open settings")
+                    Text(
+                        text = if (hasCameraPermission) {
+                            "Open settings"
+                        } else {
+                            "Allow camera"
+                        }
+                    )
                 }
             }
         }
@@ -539,10 +585,13 @@ private fun CameraScreen(
         Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
+                .fillMaxWidth()
                 .padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            IconButton(onClick = onBack) {
+            IconButton(
+                onClick = onBack
+            ) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Back",
@@ -550,13 +599,12 @@ private fun CameraScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.weight(1f))
-
             IconButton(
                 onClick = {
                     torchEnabled = !torchEnabled
                     camera?.cameraControl?.enableTorch(torchEnabled)
-                }
+                },
+                enabled = camera != null
             ) {
                 Icon(
                     imageVector = if (torchEnabled) {
@@ -578,6 +626,7 @@ private fun CameraScreen(
                     onCaptured = onCaptured
                 )
             },
+            enabled = imageCapture != null,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(28.dp)
@@ -609,14 +658,17 @@ private fun capturePhoto(
         }.getOrNull() ?: return
 
     val outputOptions =
-        ImageCapture.OutputFileOptions.Builder(targetFile).build()
+        ImageCapture.OutputFileOptions.Builder(targetFile)
+            .build()
 
     capture.takePicture(
         outputOptions,
         ContextCompat.getMainExecutor(context),
         object : ImageCapture.OnImageSavedCallback {
 
-            override fun onError(exception: ImageCaptureException) {
+            override fun onError(
+                exception: ImageCaptureException
+            ) {
                 targetFile.delete()
             }
 
@@ -624,7 +676,10 @@ private fun capturePhoto(
                 outputFileResults: ImageCapture.OutputFileResults
             ) {
                 runCatching {
-                    BitmapFactory.decodeFile(targetFile.absolutePath)
+                    decodeFileSafely(
+                        file = targetFile,
+                        maxDimension = Quality.BALANCED.maxDimension
+                    )
                 }.getOrNull()?.let { bitmap ->
                     onCaptured(bitmap)
                 }
@@ -655,21 +710,27 @@ private fun PageManager(
             .fillMaxSize()
     ) {
         Row(
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = Icons.Default.ArrowBack,
-                    contentDescription = "Back"
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = onBack
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowBack,
+                        contentDescription = "Back"
+                    )
+                }
+
+                Text(
+                    text = "Pages (${pages.size})",
+                    style = MaterialTheme.typography.titleLarge
                 )
             }
-
-            Text(
-                text = "Pages (${pages.size})",
-                style = MaterialTheme.typography.titleLarge
-            )
-
-            Spacer(modifier = Modifier.weight(1f))
 
             Button(
                 onClick = onExport,
@@ -687,7 +748,9 @@ private fun PageManager(
         }
 
         LazyColumn(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 430.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             itemsIndexed(
@@ -703,16 +766,19 @@ private fun PageManager(
                     ) {
                         Image(
                             bitmap = ImageProcessor
-                                .process(bitmap, filter)
+                                .process(
+                                    source = bitmap,
+                                    mode = filter
+                                )
                                 .asImageBitmap(),
                             contentDescription = "Page ${index + 1}",
                             modifier = Modifier.size(88.dp, 116.dp)
                         )
 
-                        Spacer(modifier = Modifier.width(12.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
 
                         Column(
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.width(110.dp)
                         ) {
                             Text(
                                 text = "Page ${index + 1}",
@@ -767,12 +833,17 @@ private fun PageManager(
             }
         }
 
+        Spacer(
+            modifier = Modifier.height(12.dp)
+        )
+
         Text(
             text = "Filter",
             style = MaterialTheme.typography.titleMedium
         )
 
         Row(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             FilterMode.entries.forEach { mode ->
@@ -798,6 +869,7 @@ private fun PageManager(
         )
 
         Row(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Quality.entries.forEach { selectedQuality ->
@@ -829,15 +901,98 @@ private fun List<Bitmap>.move(
     }
 }
 
-private fun decodeBitmap(
+private fun decodeBitmapSafely(
     resolver: ContentResolver,
-    uri: Uri
+    uri: Uri,
+    maxDimension: Int
 ): Bitmap? {
     return runCatching {
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+
         resolver.openInputStream(uri)?.use { inputStream ->
-            BitmapFactory.decodeStream(inputStream)
+            BitmapFactory.decodeStream(
+                inputStream,
+                null,
+                bounds
+            )
+        }
+
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return@runCatching null
+        }
+
+        val sampleSize = calculateSampleSize(
+            width = bounds.outWidth,
+            height = bounds.outHeight,
+            maxDimension = maxDimension
+        )
+
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
+
+        resolver.openInputStream(uri)?.use { inputStream ->
+            BitmapFactory.decodeStream(
+                inputStream,
+                null,
+                options
+            )
         }
     }.getOrNull()
+}
+
+private fun decodeFileSafely(
+    file: File,
+    maxDimension: Int
+): Bitmap? {
+    return runCatching {
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+
+        BitmapFactory.decodeFile(
+            file.absolutePath,
+            bounds
+        )
+
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return@runCatching null
+        }
+
+        val sampleSize = calculateSampleSize(
+            width = bounds.outWidth,
+            height = bounds.outHeight,
+            maxDimension = maxDimension
+        )
+
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
+
+        BitmapFactory.decodeFile(
+            file.absolutePath,
+            options
+        )
+    }.getOrNull()
+}
+
+private fun calculateSampleSize(
+    width: Int,
+    height: Int,
+    maxDimension: Int
+): Int {
+    var sampleSize = 1
+    val largestDimension = maxOf(width, height)
+
+    while (largestDimension / sampleSize > maxDimension) {
+        sampleSize *= 2
+    }
+
+    return sampleSize.coerceAtLeast(1)
 }
 
 private fun timestamp(): String {
@@ -878,7 +1033,10 @@ private object ImageProcessor {
                 false
             )
 
-        if (mode == FilterMode.ORIGINAL || mode == FilterMode.COLOR) {
+        if (
+            mode == FilterMode.ORIGINAL ||
+            mode == FilterMode.COLOR
+        ) {
             return output
         }
 
@@ -899,7 +1057,8 @@ private object ImageProcessor {
                 }
             }
 
-        paint.colorFilter = ColorMatrixColorFilter(colorMatrix)
+        paint.colorFilter =
+            ColorMatrixColorFilter(colorMatrix)
 
         canvas.drawBitmap(
             source,
@@ -924,7 +1083,7 @@ private object ImageProcessor {
                             ).toInt()
 
                     val value =
-                        if (gray > 170) {
+                        if (gray >= 170) {
                             255
                         } else {
                             0
@@ -933,7 +1092,11 @@ private object ImageProcessor {
                     output.setPixel(
                         x,
                         y,
-                        Color.rgb(value, value, value)
+                        Color.rgb(
+                            value,
+                            value,
+                            value
+                        )
                     )
                 }
             }
@@ -956,27 +1119,30 @@ private object PdfWriter {
         try {
             pages.forEachIndexed { index, originalBitmap ->
 
+                val filteredBitmap =
+                    ImageProcessor.process(
+                        source = originalBitmap,
+                        mode = filter
+                    )
+
                 val processedBitmap =
                     BitmapSizing.fit(
-                        source = ImageProcessor.process(
-                            source = originalBitmap,
-                            mode = filter
-                        ),
+                        source = filteredBitmap,
                         maxDimension = quality.maxDimension
                     )
 
-                val landscape =
+                val isLandscape =
                     processedBitmap.width >= processedBitmap.height
 
                 val pageWidth =
-                    if (landscape) {
+                    if (isLandscape) {
                         842
                     } else {
                         595
                     }
 
                 val pageHeight =
-                    if (landscape) {
+                    if (isLandscape) {
                         595
                     } else {
                         842
@@ -997,15 +1163,21 @@ private object PdfWriter {
 
                 val scale =
                     minOf(
-                        pageWidth.toFloat() / processedBitmap.width.toFloat(),
-                        pageHeight.toFloat() / processedBitmap.height.toFloat()
+                        pageWidth.toFloat() /
+                            processedBitmap.width.toFloat(),
+                        pageHeight.toFloat() /
+                            processedBitmap.height.toFloat()
                     )
 
                 val drawWidth =
-                    (processedBitmap.width * scale).toInt()
+                    (processedBitmap.width * scale)
+                        .toInt()
+                        .coerceAtLeast(1)
 
                 val drawHeight =
-                    (processedBitmap.height * scale).toInt()
+                    (processedBitmap.height * scale)
+                        .toInt()
+                        .coerceAtLeast(1)
 
                 val left =
                     (pageWidth - drawWidth) / 2
@@ -1027,8 +1199,19 @@ private object PdfWriter {
 
                 document.finishPage(page)
 
-                if (processedBitmap !== originalBitmap) {
+                if (
+                    !processedBitmap.isRecycled &&
+                    processedBitmap !== originalBitmap
+                ) {
                     processedBitmap.recycle()
+                }
+
+                if (
+                    !filteredBitmap.isRecycled &&
+                    filteredBitmap !== processedBitmap &&
+                    filteredBitmap !== originalBitmap
+                ) {
+                    filteredBitmap.recycle()
                 }
             }
 
