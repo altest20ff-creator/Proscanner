@@ -110,6 +110,9 @@ private enum class FilterMode {
     DOCUMENT
 }
 
+private const val MAX_PAGES = 20
+private const val WORKING_MAX_DIMENSION = 1200
+
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -119,6 +122,14 @@ class MainActivity : ComponentActivity() {
             ScanLiteApp()
         }
     }
+}
+
+private fun createThumbnail(
+    source: Bitmap,
+    filter: FilterMode
+): Bitmap {
+    val smallBitmap = BitmapSizing.fit(source, maxDimension = 300)
+    return ImageProcessor.process(smallBitmap, filter)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -158,13 +169,18 @@ private fun ScanLiteApp() {
         scope.launch {
             isLoading = true
 
-            val decodedPages = withContext(Dispatchers.IO) {
-                uris.mapNotNull { uri ->
-                    decodeBitmapSafely(
-                        resolver = context.contentResolver,
-                        uri = uri,
-                        maxDimension = Quality.BALANCED.maxDimension
-                    )
+            val remainingSlots = (MAX_PAGES - pages.size).coerceAtLeast(0)
+            val decodedPages = if (remainingSlots == 0) {
+                emptyList()
+            } else {
+                withContext(Dispatchers.IO) {
+                    uris.take(remainingSlots).mapNotNull { uri ->
+                        decodeBitmapSafely(
+                            resolver = context.contentResolver,
+                            uri = uri,
+                            maxDimension = WORKING_MAX_DIMENSION
+                        )
+                    }
                 }
             }
 
@@ -172,11 +188,21 @@ private fun ScanLiteApp() {
 
             if (decodedPages.isEmpty()) {
                 snackbarHostState.showSnackbar(
-                    message = "تعذر قراءة الصور المحددة"
+                    message = if (remainingSlots == 0) {
+                        "تم الوصول إلى الحد الأقصى لعدد الصفحات"
+                    } else {
+                        "تعذر قراءة الصور المحددة"
+                    }
                 )
             } else {
                 pages = pages + decodedPages
                 screen = "pages"
+
+                if (decodedPages.size < uris.size) {
+                    snackbarHostState.showSnackbar(
+                        message = "تمت إضافة ${decodedPages.size} صورة فقط لتقليل استهلاك الذاكرة"
+                    )
+                }
             }
         }
     }
@@ -277,8 +303,16 @@ private fun ScanLiteApp() {
                         CameraScreen(
                             padding = paddingValues,
                             onCaptured = { bitmap ->
-                                pages = pages + bitmap
-                                screen = "pages"
+                                if (pages.size < MAX_PAGES) {
+                                    pages = pages + bitmap
+                                    screen = "pages"
+                                } else {
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar(
+                                            message = "تم الوصول إلى الحد الأقصى لعدد الصفحات"
+                                        )
+                                    }
+                                }
                             },
                             onBack = {
                                 screen = "home"
@@ -512,16 +546,17 @@ private fun CameraScreen(
         lifecycleOwner
     ) {
         var disposed = false
+        var providerFuture: com.google.common.util.concurrent.ListenableFuture<ProcessCameraProvider>? = null
 
         if (hasCameraPermission) {
-            val providerFuture =
-                ProcessCameraProvider.getInstance(context)
+            val future = ProcessCameraProvider.getInstance(context)
+            providerFuture = future
 
-            providerFuture.addListener(
+            future.addListener(
                 {
                     if (!disposed) {
                         runCatching {
-                            val provider = providerFuture.get()
+                            val provider = future.get()
 
                             val preview =
                                 Preview.Builder()
@@ -570,11 +605,10 @@ private fun CameraScreen(
         onDispose {
             disposed = true
 
-            runCatching {
-                ProcessCameraProvider
-                    .getInstance(context)
-                    .get()
-                    .unbindAll()
+            if (providerFuture?.isDone == true) {
+                runCatching {
+                    providerFuture?.get()?.unbindAll()
+                }
             }
 
             imageCapture = null
@@ -738,7 +772,7 @@ private fun capturePhoto(
                     val bitmap =
                         decodeFileSafely(
                             file = file,
-                            maxDimension = Quality.BALANCED.maxDimension
+                            maxDimension = WORKING_MAX_DIMENSION
                         )
 
                     if (bitmap != null && !bitmap.isRecycled) {
@@ -825,16 +859,7 @@ private fun PageManager(
 
                 val thumbnail =
                     remember(bitmap, filter) {
-                        val smallBitmap =
-                            BitmapSizing.fit(
-                                source = bitmap,
-                                maxDimension = 300
-                            )
-
-                        ImageProcessor.process(
-                            source = smallBitmap,
-                            mode = filter
-                        )
+                        createThumbnail(bitmap, filter)
                     }
 
                 Card(
@@ -1025,6 +1050,10 @@ private fun decodeBitmapSafely(
                     options
                 )
             } ?: return@runCatching null
+
+        if (decoded.isRecycled) {
+            return@runCatching null
+        }
 
         BitmapSizing.fit(
             source = decoded,
