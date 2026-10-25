@@ -48,7 +48,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.Camera
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -79,6 +78,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -91,7 +91,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.OutputStream
 import java.text.SimpleDateFormat
@@ -105,6 +107,12 @@ private enum class FilterMode {
     BLACK_WHITE,
     DOCUMENT
 }
+
+private data class ScanPage(
+    val id: String,
+    val uri: Uri? = null,
+    val file: File? = null
+)
 
 class MainActivity : ComponentActivity() {
 
@@ -121,91 +129,83 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ScanLiteApp() {
     var pages by remember {
-        mutableStateOf<List<Bitmap>>(emptyList())
+        mutableStateOf<List<ScanPage>>(emptyList())
     }
 
-    var currentScreen by remember {
+    var screen by remember {
         mutableStateOf("home")
     }
 
-    var selectedFilter by remember {
+    var filter by remember {
         mutableStateOf(FilterMode.DOCUMENT)
     }
 
-    var selectedQuality by remember {
+    var quality by remember {
         mutableStateOf(Quality.BALANCED)
     }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val snackbarHostState = remember {
+    val snackbar = remember {
         SnackbarHostState()
     }
 
-    val importLauncher =
+    val galleryLauncher =
         rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.OpenMultipleDocuments()
+            contract = ActivityResultContracts.GetMultipleContents()
         ) { uris ->
 
             if (uris.isEmpty()) {
                 return@rememberLauncherForActivityResult
             }
 
-            val imported = uris.mapNotNull { uri ->
-                decodeBitmapSafely(
-                    resolver = context.contentResolver,
-                    uri = uri,
-                    maxDimension = Quality.BALANCED.maxDimension
+            val newPages = uris.mapIndexed { index, uri ->
+                ScanPage(
+                    id = "gallery-${System.currentTimeMillis()}-$index",
+                    uri = uri
                 )
             }
 
-            if (imported.isEmpty()) {
-                scope.launch {
-                    snackbarHostState.showSnackbar(
-                        "The selected files could not be read as images."
-                    )
-                }
-                return@rememberLauncherForActivityResult
-            }
-
-            pages = pages + imported
-            currentScreen = "pages"
+            pages = pages + newPages
+            screen = "pages"
         }
 
-    val createPdfLauncher =
+    val pdfLauncher =
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.CreateDocument(
                 "application/pdf"
             )
-        ) { destinationUri ->
+        ) { destination ->
 
-            if (destinationUri == null || pages.isEmpty()) {
+            if (destination == null || pages.isEmpty()) {
                 return@rememberLauncherForActivityResult
             }
 
             scope.launch {
                 runCatching {
                     val output =
-                        context.contentResolver.openOutputStream(
-                            destinationUri
-                        ) ?: error("Could not open the selected destination.")
+                        context.contentResolver.openOutputStream(destination)
+                            ?: error("Cannot open selected destination")
 
                     output.use { stream ->
                         PdfWriter.write(
+                            resolver = context.contentResolver,
                             pages = pages,
                             output = stream,
-                            filter = selectedFilter,
-                            quality = selectedQuality
+                            filter = filter,
+                            quality = quality
                         )
                     }
 
                     sharePdf(
                         context = context,
-                        uri = destinationUri
+                        uri = destination
                     )
                 }.onFailure { error ->
-                    snackbarHostState.showSnackbar(
-                        "Export failed: ${error.message ?: "unknown error"}"
+                    snackbar.showSnackbar(
+                        "PDF export failed: ${
+                            error.message ?: "unknown error"
+                        }"
                     )
                 }
             }
@@ -231,54 +231,60 @@ private fun ScanLiteApp() {
             },
             snackbarHost = {
                 SnackbarHost(
-                    hostState = snackbarHostState
+                    hostState = snackbar
                 )
             }
-        ) { paddingValues ->
+        ) { padding ->
 
-            when (currentScreen) {
+            when (screen) {
                 "camera" -> {
                     CameraScreen(
-                        padding = paddingValues,
-                        onCaptured = { bitmap ->
-                            pages = pages + bitmap
-                            currentScreen = "pages"
+                        padding = padding,
+                        onCaptured = { file ->
+                            pages = pages + ScanPage(
+                                id = "camera-${file.name}",
+                                file = file
+                            )
+                            screen = "pages"
                         },
                         onBack = {
-                            currentScreen = "home"
+                            screen = "home"
                         }
                     )
                 }
 
                 "pages" -> {
                     PageManager(
-                        padding = paddingValues,
+                        padding = padding,
                         pages = pages,
-                        filter = selectedFilter,
-                        quality = selectedQuality,
+                        filter = filter,
+                        quality = quality,
+                        resolver = context.contentResolver,
                         onFilterChanged = {
-                            selectedFilter = it
+                            filter = it
                         },
                         onQualityChanged = {
-                            selectedQuality = it
+                            quality = it
                         },
                         onMove = { from, to ->
                             pages = pages.move(from, to)
                         },
                         onDelete = { index ->
-                            pages = pages.filterIndexed { currentIndex, _ ->
-                                currentIndex != index
+                            pages = pages.filterIndexed { current, _ ->
+                                current != index
                             }
                         },
                         onBack = {
-                            currentScreen = "home"
+                            screen = "home"
                         },
                         onExport = {
-                            createPdfLauncher.launch(
-                                FileNaming.pdf(
-                                    prefix = "ScanLite",
-                                    timestamp = timestamp()
-                                )
+                            pdfLauncher.launch(
+                                "ScanLite-${
+                                    SimpleDateFormat(
+                                        "yyyyMMdd-HHmmss",
+                                        Locale.US
+                                    ).format(Date())
+                                }.pdf"
                             )
                         }
                     )
@@ -286,19 +292,17 @@ private fun ScanLiteApp() {
 
                 else -> {
                     HomeScreen(
-                        padding = paddingValues,
+                        padding = padding,
                         pages = pages,
                         onScan = {
-                            currentScreen = "camera"
+                            screen = "camera"
                         },
-                        onImport = {
-                            importLauncher.launch(
-                                arrayOf("image/*")
-                            )
+                        onGallery = {
+                            galleryLauncher.launch("image/*")
                         },
                         onOpenPages = {
                             if (pages.isNotEmpty()) {
-                                currentScreen = "pages"
+                                screen = "pages"
                             }
                         }
                     )
@@ -311,9 +315,9 @@ private fun ScanLiteApp() {
 @Composable
 private fun HomeScreen(
     padding: PaddingValues,
-    pages: List<Bitmap>,
+    pages: List<ScanPage>,
     onScan: () -> Unit,
-    onImport: () -> Unit,
+    onGallery: () -> Unit,
     onOpenPages: () -> Unit
 ) {
     Column(
@@ -324,12 +328,12 @@ private fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text(
-            text = "Your private paperless desk",
+            text = "ScanLite",
             style = MaterialTheme.typography.headlineSmall
         )
 
         Text(
-            text = "Scan, enhance, and export PDFs on this device."
+            text = "Scan and convert your documents locally."
         )
 
         Button(
@@ -347,11 +351,11 @@ private fun HomeScreen(
                 modifier = Modifier.width(8.dp)
             )
 
-            Text(text = "Scan document")
+            Text(text = "Scan with camera")
         }
 
         OutlinedButton(
-            onClick = onImport,
+            onClick = onGallery,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(58.dp)
@@ -365,7 +369,7 @@ private fun HomeScreen(
                 modifier = Modifier.width(8.dp)
             )
 
-            Text(text = "Import images")
+            Text(text = "Choose from gallery")
         }
 
         if (pages.isEmpty()) {
@@ -376,17 +380,12 @@ private fun HomeScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "No documents yet",
+                    text = "No pages selected",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         } else {
             HorizontalDivider()
-
-            Text(
-                text = "Current draft",
-                style = MaterialTheme.typography.titleMedium
-            )
 
             Card(
                 onClick = onOpenPages,
@@ -406,7 +405,7 @@ private fun HomeScreen(
                     )
 
                     Text(
-                        text = "${pages.size} page(s) ready"
+                        text = "${pages.size} page(s) selected"
                     )
                 }
             }
@@ -417,7 +416,7 @@ private fun HomeScreen(
 @Composable
 private fun CameraScreen(
     padding: PaddingValues,
-    onCaptured: (Bitmap) -> Unit,
+    onCaptured: (File) -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -432,7 +431,7 @@ private fun CameraScreen(
         )
     }
 
-    var imageCapture by remember {
+    var capture by remember {
         mutableStateOf<ImageCapture?>(null)
     }
 
@@ -440,12 +439,12 @@ private fun CameraScreen(
         mutableStateOf<Camera?>(null)
     }
 
-    var torchEnabled by remember {
-        mutableStateOf(false)
-    }
-
     var cameraError by remember {
         mutableStateOf<String?>(null)
+    }
+
+    var torchEnabled by remember {
+        mutableStateOf(false)
     }
 
     val previewView = remember {
@@ -459,7 +458,7 @@ private fun CameraScreen(
             hasPermission = granted
 
             if (!granted) {
-                cameraError = "Camera permission is required."
+                cameraError = "Camera permission was denied."
             }
         }
 
@@ -493,13 +492,13 @@ private fun CameraScreen(
                         val preview =
                             Preview.Builder()
                                 .build()
-                                .also { previewUseCase ->
-                                    previewUseCase.setSurfaceProvider(
+                                .also {
+                                    it.setSurfaceProvider(
                                         previewView.surfaceProvider
                                     )
                                 }
 
-                        val capture =
+                        val imageCapture =
                             ImageCapture.Builder()
                                 .setCaptureMode(
                                     ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
@@ -513,19 +512,19 @@ private fun CameraScreen(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
                                 preview,
-                                capture
+                                imageCapture
                             )
 
                         if (!disposed) {
-                            imageCapture = capture
+                            capture = imageCapture
                             camera = boundCamera
                             cameraError = null
                         }
                     }.onFailure {
                         if (!disposed) {
-                            imageCapture = null
+                            capture = null
                             camera = null
-                            cameraError = "Unable to start the camera."
+                            cameraError = "Unable to start camera."
                         }
                     }
                 },
@@ -543,7 +542,7 @@ private fun CameraScreen(
                     .unbindAll()
             }
 
-            imageCapture = null
+            capture = null
             camera = null
         }
     }
@@ -648,10 +647,10 @@ private fun CameraScreen(
 
         FloatingActionButton(
             onClick = {
-                imageCapture?.let { capture ->
+                capture?.let { imageCapture ->
                     capturePhoto(
                         context = context,
-                        capture = capture,
+                        imageCapture = imageCapture,
                         onCaptured = onCaptured
                     )
                 }
@@ -661,7 +660,7 @@ private fun CameraScreen(
                 .padding(28.dp)
         ) {
             Icon(
-                imageVector = Icons.Default.Camera,
+                imageVector = Icons.Default.CameraAlt,
                 contentDescription = "Capture"
             )
         }
@@ -670,49 +669,41 @@ private fun CameraScreen(
 
 private fun capturePhoto(
     context: Context,
-    capture: ImageCapture,
-    onCaptured: (Bitmap) -> Unit
+    imageCapture: ImageCapture,
+    onCaptured: (File) -> Unit
 ) {
-    val targetFile =
+    val target =
         runCatching {
             File.createTempFile(
-                "scan_capture_",
+                "scanlite-",
                 ".jpg",
-                context.cacheDir
+                context.filesDir
             )
         }.getOrNull() ?: return
 
-    val outputOptions =
-        ImageCapture.OutputFileOptions.Builder(
-            targetFile
-        ).build()
+    val options =
+        ImageCapture.OutputFileOptions
+            .Builder(target)
+            .build()
 
-    capture.takePicture(
-        outputOptions,
+    imageCapture.takePicture(
+        options,
         ContextCompat.getMainExecutor(context),
         object : ImageCapture.OnImageSavedCallback {
 
             override fun onError(
                 exception: ImageCaptureException
             ) {
-                targetFile.delete()
+                target.delete()
             }
 
             override fun onImageSaved(
                 outputFileResults: ImageCapture.OutputFileResults
             ) {
-                try {
-                    val bitmap =
-                        decodeFileSafely(
-                            file = targetFile,
-                            maxDimension = Quality.BALANCED.maxDimension
-                        )
-
-                    if (bitmap != null && !bitmap.isRecycled) {
-                        onCaptured(bitmap)
-                    }
-                } finally {
-                    targetFile.delete()
+                if (target.exists() && target.length() > 0L) {
+                    onCaptured(target)
+                } else {
+                    target.delete()
                 }
             }
         }
@@ -722,9 +713,10 @@ private fun capturePhoto(
 @Composable
 private fun PageManager(
     padding: PaddingValues,
-    pages: List<Bitmap>,
+    pages: List<ScanPage>,
     filter: FilterMode,
     quality: Quality,
+    resolver: ContentResolver,
     onFilterChanged: (FilterMode) -> Unit,
     onQualityChanged: (Quality) -> Unit,
     onMove: (Int, Int) -> Unit,
@@ -782,20 +774,30 @@ private fun PageManager(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = 430.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             itemsIndexed(
-                items = pages
-            ) { index, bitmap ->
+                items = pages,
+                key = { _, page -> page.id }
+            ) { index, page ->
 
-                val previewBitmap = remember(
-                    bitmap,
-                    filter
+                val preview by produceState<Bitmap?>(
+                    initialValue = null,
+                    key1 = page.id,
+                    key2 = filter
                 ) {
-                    createPreviewBitmap(
-                        source = bitmap,
-                        filter = filter
-                    )
+                    value = withContext(Dispatchers.IO) {
+                        loadPageBitmap(
+                            resolver = resolver,
+                            page = page,
+                            maxDimension = 320
+                        )?.let { bitmap ->
+                            processBitmap(
+                                source = bitmap,
+                                mode = filter
+                            )
+                        }
+                    }
                 }
 
                 Card(
@@ -805,487 +807,12 @@ private fun PageManager(
                         modifier = Modifier.padding(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Image(
-                            bitmap = previewBitmap.asImageBitmap(),
-                            contentDescription = "Page ${index + 1}",
-                            modifier = Modifier.size(72.dp, 96.dp)
-                        )
-
-                        Spacer(
-                            modifier = Modifier.width(8.dp)
-                        )
-
-                        Column(
-                            modifier = Modifier.width(92.dp)
-                        ) {
-                            Text(
-                                text = "Page ${index + 1}",
-                                fontWeight = FontWeight.Bold
+                        if (preview != null) {
+                            Image(
+                                bitmap = preview!!.asImageBitmap(),
+                                contentDescription = "Page ${index + 1}",
+                                modifier = Modifier.size(72.dp, 96.dp)
                             )
-
-                            Text(
-                                text = "${bitmap.width} × ${bitmap.height}"
-                            )
-                        }
-
-                        IconButton(
-                            onClick = {
-                                if (index > 0) {
-                                    onMove(index, index - 1)
-                                }
-                            },
-                            enabled = index > 0
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowUpward,
-                                contentDescription = "Move up"
-                            )
-                        }
-
-                        IconButton(
-                            onClick = {
-                                if (index < pages.lastIndex) {
-                                    onMove(index, index + 1)
-                                }
-                            },
-                            enabled = index < pages.lastIndex
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowDownward,
-                                contentDescription = "Move down"
-                            )
-                        }
-
-                        IconButton(
-                            onClick = {
-                                onDelete(index)
-                            }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Delete,
-                                contentDescription = "Delete page"
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        Spacer(
-            modifier = Modifier.height(12.dp)
-        )
-
-        Text(
-            text = "Filter",
-            style = MaterialTheme.typography.titleMedium
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            FilterMode.values().forEach { mode ->
-                FilterChip(
-                    selected = filter == mode,
-                    onClick = {
-                        onFilterChanged(mode)
-                    },
-                    label = {
-                        Text(
-                            text = mode.name.replace('_', ' '),
-                            maxLines = 1
-                        )
-                    }
-                )
-            }
-        }
-
-        Text(
-            text = "Compression",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(top = 10.dp)
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Quality.values().forEach { currentQuality ->
-                FilterChip(
-                    selected = quality == currentQuality,
-                    onClick = {
-                        onQualityChanged(currentQuality)
-                    },
-                    label = {
-                        Text(text = currentQuality.name)
-                    }
-                )
-            }
-        }
-    }
-}
-
-private fun createPreviewBitmap(
-    source: Bitmap,
-    filter: FilterMode
-): Bitmap {
-    val thumbnail =
-        BitmapSizing.fit(
-            source = source,
-            maxDimension = 320
-        )
-
-    return ImageProcessor.process(
-        source = thumbnail,
-        mode = filter
-    )
-}
-
-private fun List<Bitmap>.move(
-    from: Int,
-    to: Int
-): List<Bitmap> {
-    if (from !in indices || to !in indices) {
-        return this
-    }
-
-    return toMutableList().also { list ->
-        val item = list.removeAt(from)
-        list.add(to, item)
-    }
-}
-
-private fun decodeBitmapSafely(
-    resolver: ContentResolver,
-    uri: Uri,
-    maxDimension: Int
-): Bitmap? {
-    return runCatching {
-        val bounds =
-            BitmapFactory.Options().apply {
-                inJustDecodeBounds = true
-            }
-
-        resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(
-                input,
-                null,
-                bounds
-            )
-        }
-
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            return@runCatching null
-        }
-
-        val sampleSize =
-            calculateSampleSize(
-                width = bounds.outWidth,
-                height = bounds.outHeight,
-                maxDimension = maxDimension
-            )
-
-        val options =
-            BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.RGB_565
-                inMutable = false
-            }
-
-        val decoded =
-            resolver.openInputStream(uri)?.use { input ->
-                BitmapFactory.decodeStream(
-                    input,
-                    null,
-                    options
-                )
-            } ?: return@runCatching null
-
-        BitmapSizing.fit(
-            source = decoded,
-            maxDimension = maxDimension
-        )
-    }.getOrNull()
-}
-
-private fun decodeFileSafely(
-    file: File,
-    maxDimension: Int
-): Bitmap? {
-    return runCatching {
-        val bounds =
-            BitmapFactory.Options().apply {
-                inJustDecodeBounds = true
-            }
-
-        BitmapFactory.decodeFile(
-            file.absolutePath,
-            bounds
-        )
-
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            return@runCatching null
-        }
-
-        val sampleSize =
-            calculateSampleSize(
-                width = bounds.outWidth,
-                height = bounds.outHeight,
-                maxDimension = maxDimension
-            )
-
-        val options =
-            BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.RGB_565
-                inMutable = false
-            }
-
-        val decoded =
-            BitmapFactory.decodeFile(
-                file.absolutePath,
-                options
-            ) ?: return@runCatching null
-
-        BitmapSizing.fit(
-            source = decoded,
-            maxDimension = maxDimension
-        )
-    }.getOrNull()
-}
-
-private fun calculateSampleSize(
-    width: Int,
-    height: Int,
-    maxDimension: Int
-): Int {
-    if (width <= 0 || height <= 0 || maxDimension <= 0) {
-        return 1
-    }
-
-    var sampleSize = 1
-    val largestDimension = maxOf(width, height)
-
-    while (largestDimension / sampleSize > maxDimension) {
-        sampleSize *= 2
-    }
-
-    return sampleSize.coerceAtLeast(1)
-}
-
-private fun timestamp(): String {
-    return SimpleDateFormat(
-        "yyyyMMdd-HHmmss",
-        Locale.US
-    ).format(Date())
-}
-
-private fun sharePdf(
-    context: Context,
-    uri: Uri
-) {
-    val intent =
-        Intent(Intent.ACTION_SEND).apply {
-            type = "application/pdf"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-
-    context.startActivity(
-        Intent.createChooser(
-            intent,
-            "Share PDF"
-        )
-    )
-}
-
-private object ImageProcessor {
-
-    fun process(
-        source: Bitmap,
-        mode: FilterMode
-    ): Bitmap {
-        val output =
-            source.copy(
-                Bitmap.Config.ARGB_8888,
-                false
-            )
-
-        if (
-            mode == FilterMode.ORIGINAL ||
-            mode == FilterMode.COLOR
-        ) {
-            return output
-        }
-
-        val canvas = Canvas(output)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-
-        val matrix =
-            ColorMatrix().apply {
-                setSaturation(0f)
-
-                if (mode == FilterMode.DOCUMENT) {
-                    setScale(
-                        1.15f,
-                        1.15f,
-                        1.15f,
-                        1f
-                    )
-                }
-            }
-
-        paint.colorFilter =
-            ColorMatrixColorFilter(matrix)
-
-        canvas.drawBitmap(
-            source,
-            0f,
-            0f,
-            paint
-        )
-
-        if (
-            mode == FilterMode.BLACK_WHITE ||
-            mode == FilterMode.DOCUMENT
-        ) {
-            for (y in 0 until output.height) {
-                for (x in 0 until output.width) {
-                    val pixel = output.getPixel(x, y)
-
-                    val gray =
-                        (
-                            Color.red(pixel) * 0.299f +
-                                Color.green(pixel) * 0.587f +
-                                Color.blue(pixel) * 0.114f
-                            ).toInt()
-
-                    val value =
-                        if (gray >= 170) 255 else 0
-
-                    output.setPixel(
-                        x,
-                        y,
-                        Color.rgb(
-                            value,
-                            value,
-                            value
-                        )
-                    )
-                }
-            }
-        }
-
-        return output
-    }
-}
-
-private object PdfWriter {
-
-    fun write(
-        pages: List<Bitmap>,
-        output: OutputStream,
-        filter: FilterMode,
-        quality: Quality
-    ) {
-        val document =
-            android.graphics.pdf.PdfDocument()
-
-        try {
-            pages.forEachIndexed { index, originalBitmap ->
-
-                val filteredBitmap =
-                    ImageProcessor.process(
-                        source = originalBitmap,
-                        mode = filter
-                    )
-
-                val processedBitmap =
-                    BitmapSizing.fit(
-                        source = filteredBitmap,
-                        maxDimension = quality.maxDimension
-                    )
-
-                val landscape =
-                    processedBitmap.width >= processedBitmap.height
-
-                val pageWidth =
-                    if (landscape) 842 else 595
-
-                val pageHeight =
-                    if (landscape) 595 else 842
-
-                val pageInfo =
-                    android.graphics.pdf.PdfDocument.PageInfo
-                        .Builder(
-                            pageWidth,
-                            pageHeight,
-                            index + 1
-                        )
-                        .create()
-
-                val page =
-                    document.startPage(pageInfo)
-
-                page.canvas.drawColor(Color.WHITE)
-
-                val scale =
-                    minOf(
-                        pageWidth.toFloat() /
-                            processedBitmap.width.toFloat(),
-                        pageHeight.toFloat() /
-                            processedBitmap.height.toFloat()
-                    )
-
-                val drawWidth =
-                    (processedBitmap.width * scale)
-                        .toInt()
-                        .coerceAtLeast(1)
-
-                val drawHeight =
-                    (processedBitmap.height * scale)
-                        .toInt()
-                        .coerceAtLeast(1)
-
-                val left =
-                    (pageWidth - drawWidth) / 2
-
-                val top =
-                    (pageHeight - drawHeight) / 2
-
-                page.canvas.drawBitmap(
-                    processedBitmap,
-                    null,
-                    android.graphics.Rect(
-                        left,
-                        top,
-                        left + drawWidth,
-                        top + drawHeight
-                    ),
-                    Paint(Paint.FILTER_BITMAP_FLAG)
-                )
-
-                document.finishPage(page)
-
-                if (
-                    processedBitmap !== originalBitmap &&
-                    !processedBitmap.isRecycled
-                ) {
-                    processedBitmap.recycle()
-                }
-
-                if (
-                    filteredBitmap !== originalBitmap &&
-                    filteredBitmap !== processedBitmap &&
-                    !filteredBitmap.isRecycled
-                ) {
-                    filteredBitmap.recycle()
-                }
-            }
-
-            document.writeTo(output)
-        } finally {
-            document.close()
-        }
-    }
-}
+                        } else {
+                            Box(
+                                modifier = Modifier.size(72.dp, 96.dp),
