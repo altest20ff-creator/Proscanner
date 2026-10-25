@@ -41,7 +41,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
@@ -151,7 +150,7 @@ private fun ScanLiteApp() {
             if (loaded.isEmpty() && uris.isNotEmpty()) {
                 coroutineScope.launch {
                     snackbarHostState.showSnackbar(
-                        "Could not read the selected images"
+                        message = "Could not read the selected images"
                     )
                 }
             }
@@ -188,10 +187,13 @@ private fun ScanLiteApp() {
                         )
                     }
 
-                    sharePdf(context, uri)
+                    sharePdf(
+                        context = context,
+                        uri = uri
+                    )
                 }.onFailure { error ->
                     snackbarHostState.showSnackbar(
-                        "Export failed: ${error.message ?: "unknown error"}"
+                        message = "Export failed: ${error.message ?: "unknown error"}"
                     )
                 }
             }
@@ -216,7 +218,9 @@ private fun ScanLiteApp() {
                 )
             },
             snackbarHost = {
-                SnackbarHost(hostState = snackbarHostState)
+                SnackbarHost(
+                    hostState = snackbarHostState
+                )
             }
         ) { paddingValues ->
 
@@ -687,8 +691,7 @@ private fun PageManager(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             itemsIndexed(
-                items = pages,
-                key = { index, _ -> index }
+                items = pages
             ) { index, bitmap ->
 
                 Card(
@@ -952,6 +955,7 @@ private object PdfWriter {
 
         try {
             pages.forEachIndexed { index, originalBitmap ->
+
                 val processedBitmap =
                     BitmapSizing.fit(
                         source = ImageProcessor.process(
