@@ -86,6 +86,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -139,7 +140,7 @@ private fun ScanLiteApp() {
         mutableStateOf(Quality.BALANCED)
     }
 
-    var loading by remember {
+    var isLoading by remember {
         mutableStateOf(false)
     }
 
@@ -155,24 +156,23 @@ private fun ScanLiteApp() {
         }
 
         scope.launch {
-            loading = true
+            isLoading = true
 
-            val decodedPages =
-                withContext(Dispatchers.IO) {
-                    uris.mapNotNull { uri ->
-                        decodeBitmapSafely(
-                            resolver = context.contentResolver,
-                            uri = uri,
-                            maxDimension = Quality.BALANCED.maxDimension
-                        )
-                    }
+            val decodedPages = withContext(Dispatchers.IO) {
+                uris.mapNotNull { uri ->
+                    decodeBitmapSafely(
+                        resolver = context.contentResolver,
+                        uri = uri,
+                        maxDimension = Quality.BALANCED.maxDimension
+                    )
                 }
+            }
 
-            loading = false
+            isLoading = false
 
             if (decodedPages.isEmpty()) {
                 snackbarHostState.showSnackbar(
-                    "تعذر قراءة الصورة. اختر JPG أو PNG أو WEBP أو HEIC."
+                    message = "تعذر قراءة الصور المحددة"
                 )
             } else {
                 pages = pages + decodedPages
@@ -181,14 +181,14 @@ private fun ScanLiteApp() {
         }
     }
 
-    val imagePicker =
+    val imagePickerLauncher =
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.OpenMultipleDocuments()
         ) { uris ->
             importImages(uris)
         }
 
-    val pdfCreator =
+    val pdfLauncher =
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.CreateDocument(
                 "application/pdf"
@@ -200,7 +200,7 @@ private fun ScanLiteApp() {
             }
 
             scope.launch {
-                loading = true
+                isLoading = true
 
                 runCatching {
                     withContext(Dispatchers.IO) {
@@ -225,11 +225,13 @@ private fun ScanLiteApp() {
                     )
                 }.onFailure { error ->
                     snackbarHostState.showSnackbar(
-                        "فشل إنشاء PDF: ${error.message ?: "خطأ غير معروف"}"
+                        message = "فشل إنشاء PDF: ${
+                            error.message ?: "خطأ غير معروف"
+                        }"
                     )
                 }
 
-                loading = false
+                isLoading = false
             }
         }
 
@@ -258,14 +260,16 @@ private fun ScanLiteApp() {
             }
         ) { paddingValues ->
 
-            if (loading) {
+            if (isLoading) {
                 Box(
                     modifier = Modifier
                         .padding(paddingValues)
                         .fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(text = "جاري تجهيز الصور...")
+                    Text(
+                        text = "جاري تجهيز الصور..."
+                    )
                 }
             } else {
                 when (screen) {
@@ -306,7 +310,7 @@ private fun ScanLiteApp() {
                                 screen = "home"
                             },
                             onExport = {
-                                pdfCreator.launch(
+                                pdfLauncher.launch(
                                     FileNaming.pdf(
                                         prefix = "ScanLite",
                                         timestamp = currentTimestamp()
@@ -324,7 +328,7 @@ private fun ScanLiteApp() {
                                 screen = "camera"
                             },
                             onImport = {
-                                imagePicker.launch(
+                                imagePickerLauncher.launch(
                                     arrayOf("image/*")
                                 )
                             },
@@ -380,7 +384,9 @@ private fun HomeScreen(
                 modifier = Modifier.width(8.dp)
             )
 
-            Text(text = "فتح الكاميرا")
+            Text(
+                text = "فتح الكاميرا"
+            )
         }
 
         OutlinedButton(
@@ -398,7 +404,9 @@ private fun HomeScreen(
                 modifier = Modifier.width(8.dp)
             )
 
-            Text(text = "اختيار من الاستديو أو الملفات")
+            Text(
+                text = "اختيار من الاستديو أو الملفات"
+            )
         }
 
         if (pages.isEmpty()) {
@@ -511,49 +519,47 @@ private fun CameraScreen(
 
             providerFuture.addListener(
                 {
-                    if (disposed) {
-                        return@addListener
-                    }
+                    if (!disposed) {
+                        runCatching {
+                            val provider = providerFuture.get()
 
-                    runCatching {
-                        val provider = providerFuture.get()
+                            val preview =
+                                Preview.Builder()
+                                    .build()
+                                    .also { previewUseCase ->
+                                        previewUseCase.setSurfaceProvider(
+                                            previewView.surfaceProvider
+                                        )
+                                    }
 
-                        val preview =
-                            Preview.Builder()
-                                .build()
-                                .also {
-                                    it.setSurfaceProvider(
-                                        previewView.surfaceProvider
+                            val capture =
+                                ImageCapture.Builder()
+                                    .setCaptureMode(
+                                        ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                                     )
-                                }
+                                    .build()
 
-                        val capture =
-                            ImageCapture.Builder()
-                                .setCaptureMode(
-                                    ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                            provider.unbindAll()
+
+                            val boundCamera =
+                                provider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    CameraSelector.DEFAULT_BACK_CAMERA,
+                                    preview,
+                                    capture
                                 )
-                                .build()
 
-                        provider.unbindAll()
-
-                        val boundCamera =
-                            provider.bindToLifecycle(
-                                lifecycleOwner,
-                                CameraSelector.DEFAULT_BACK_CAMERA,
-                                preview,
-                                capture
-                            )
-
-                        if (!disposed) {
-                            imageCapture = capture
-                            camera = boundCamera
-                            cameraError = null
-                        }
-                    }.onFailure {
-                        if (!disposed) {
-                            imageCapture = null
-                            camera = null
-                            cameraError = "تعذر تشغيل الكاميرا"
+                            if (!disposed) {
+                                imageCapture = capture
+                                camera = boundCamera
+                                cameraError = null
+                            }
+                        }.onFailure {
+                            if (!disposed) {
+                                imageCapture = null
+                                camera = null
+                                cameraError = "تعذر تشغيل الكاميرا"
+                            }
                         }
                     }
                 },
@@ -580,7 +586,7 @@ private fun CameraScreen(
         modifier = Modifier
             .padding(padding)
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.scrim)
+            .background(ComposeColor.Black)
     ) {
         if (hasCameraPermission) {
             AndroidView(
@@ -601,7 +607,7 @@ private fun CameraScreen(
                 Text(
                     text = cameraError
                         ?: "يجب السماح باستخدام الكاميرا",
-                    color = Color.WHITE
+                    color = ComposeColor.White
                 )
 
                 Spacer(
@@ -650,7 +656,7 @@ private fun CameraScreen(
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "رجوع",
-                    tint = Color.WHITE
+                    tint = ComposeColor.White
                 )
             }
 
@@ -669,7 +675,7 @@ private fun CameraScreen(
                         Icons.Default.FlashOff
                     },
                     contentDescription = "الفلاش",
-                    tint = Color.WHITE
+                    tint = ComposeColor.White
                 )
             }
         }
@@ -710,12 +716,12 @@ private fun capturePhoto(
             )
         }.getOrNull() ?: return
 
-    val options =
+    val outputOptions =
         ImageCapture.OutputFileOptions.Builder(file)
             .build()
 
     capture.takePicture(
-        options,
+        outputOptions,
         ContextCompat.getMainExecutor(context),
         object : ImageCapture.OnImageSavedCallback {
 
@@ -801,7 +807,9 @@ private fun PageManager(
                     modifier = Modifier.width(4.dp)
                 )
 
-                Text(text = "PDF")
+                Text(
+                    text = "PDF"
+                )
             }
         }
 
@@ -948,7 +956,9 @@ private fun PageManager(
                         onQualityChanged(currentQuality)
                     },
                     label = {
-                        Text(text = currentQuality.name)
+                        Text(
+                            text = currentQuality.name
+                        )
                     }
                 )
             }
@@ -1056,15 +1066,9 @@ private fun decodeFileSafely(
                 inMutable = false
             }
 
-        val decoded =
-            BitmapFactory.decodeFile(
-                file.absolutePath,
-                options
-            ) ?: return@runCatching null
-
-        BitmapSizing.fit(
-            source = decoded,
-            maxDimension = maxDimension
+        BitmapFactory.decodeFile(
+            file.absolutePath,
+            options
         )
     }.getOrNull()
 }
@@ -1176,7 +1180,11 @@ private object ImageProcessor {
                             ).toInt()
 
                     val value =
-                        if (gray >= 170) 255 else 0
+                        if (gray >= 170) {
+                            255
+                        } else {
+                            0
+                        }
 
                     output.setPixel(
                         x,
@@ -1221,14 +1229,22 @@ private object PdfWriter {
                         maxDimension = quality.maxDimension
                     )
 
-                val landscape =
+                val isLandscape =
                     processedBitmap.width >= processedBitmap.height
 
                 val pageWidth =
-                    if (landscape) 842 else 595
+                    if (isLandscape) {
+                        842
+                    } else {
+                        595
+                    }
 
                 val pageHeight =
-                    if (landscape) 595 else 842
+                    if (isLandscape) {
+                        595
+                    } else {
+                        842
+                    }
 
                 val pageInfo =
                     android.graphics.pdf.PdfDocument.PageInfo
