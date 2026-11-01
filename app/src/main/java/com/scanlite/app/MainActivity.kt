@@ -1,16 +1,11 @@
 package com.scanlite.app
 
 import android.Manifest
-import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.net.Uri
 import android.os.Bundle
@@ -102,7 +97,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private enum class FilterMode {
+internal enum class FilterMode {
     ORIGINAL,
     COLOR,
     GRAYSCALE,
@@ -111,8 +106,6 @@ private enum class FilterMode {
 }
 
 private const val MAX_PAGES = 20
-private const val WORKING_MAX_DIMENSION = 1200
-
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -129,7 +122,11 @@ private fun createThumbnail(
     filter: FilterMode
 ): Bitmap {
     val smallBitmap = BitmapSizing.fit(source, maxDimension = 300)
-    return ImageProcessor.process(smallBitmap, filter)
+    val thumbnail = ImageProcessor.process(smallBitmap, filter)
+    if (thumbnail !== smallBitmap && smallBitmap !== source && !smallBitmap.isRecycled) {
+        smallBitmap.recycle()
+    }
+    return thumbnail
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -162,24 +159,19 @@ private fun ScanLiteApp() {
     }
 
     fun importImages(uris: List<Uri>) {
-        if (uris.isEmpty()) {
+        if (uris.isEmpty() || isLoading) {
             return
         }
 
+        isLoading = true
         scope.launch {
-            isLoading = true
-
             val remainingSlots = (MAX_PAGES - pages.size).coerceAtLeast(0)
             val decodedPages = if (remainingSlots == 0) {
                 emptyList()
             } else {
                 withContext(Dispatchers.IO) {
                     uris.take(remainingSlots).mapNotNull { uri ->
-                        decodeBitmapSafely(
-                            resolver = context.contentResolver,
-                            uri = uri,
-                            maxDimension = WORKING_MAX_DIMENSION
-                        )
+                        ImageDecoder.decodeUri(context.contentResolver, uri)
                     }
                 }
             }
@@ -211,6 +203,14 @@ private fun ScanLiteApp() {
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.OpenMultipleDocuments()
         ) { uris ->
+            uris.forEach { uri ->
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
+            }
             importImages(uris)
         }
 
@@ -491,6 +491,7 @@ private fun CameraScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var hasCameraPermission by remember {
@@ -516,6 +517,10 @@ private fun CameraScreen(
 
     var cameraError by remember {
         mutableStateOf<String?>(null)
+    }
+
+    var isCapturing by remember {
+        mutableStateOf(false)
     }
 
     val previewView = remember {
@@ -716,11 +721,23 @@ private fun CameraScreen(
 
         FloatingActionButton(
             onClick = {
+                if (isCapturing) {
+                    return@FloatingActionButton
+                }
                 imageCapture?.let { capture ->
+                    isCapturing = true
                     capturePhoto(
                         context = context,
                         capture = capture,
-                        onCaptured = onCaptured
+                        scope = scope,
+                        onCaptured = onCaptured,
+                        onError = {
+                            isCapturing = false
+                            cameraError = "تعذر قراءة الصورة الملتقطة"
+                        },
+                        onFinished = {
+                            isCapturing = false
+                        }
                     )
                 }
             },
@@ -739,7 +756,10 @@ private fun CameraScreen(
 private fun capturePhoto(
     context: Context,
     capture: ImageCapture,
-    onCaptured: (Bitmap) -> Unit
+    scope: kotlinx.coroutines.CoroutineScope,
+    onCaptured: (Bitmap) -> Unit,
+    onError: () -> Unit,
+    onFinished: () -> Unit
 ) {
     val file =
         runCatching {
@@ -748,7 +768,10 @@ private fun capturePhoto(
                 ".jpg",
                 context.cacheDir
             )
-        }.getOrNull() ?: return
+        }.getOrNull() ?: run {
+            onError()
+            return
+        }
 
     val outputOptions =
         ImageCapture.OutputFileOptions.Builder(file)
@@ -763,23 +786,23 @@ private fun capturePhoto(
                 exception: ImageCaptureException
             ) {
                 file.delete()
+                onError()
             }
 
             override fun onImageSaved(
                 outputFileResults: ImageCapture.OutputFileResults
             ) {
-                try {
-                    val bitmap =
-                        decodeFileSafely(
-                            file = file,
-                            maxDimension = WORKING_MAX_DIMENSION
-                        )
-
-                    if (bitmap != null && !bitmap.isRecycled) {
-                        onCaptured(bitmap)
-                    }
-                } finally {
+                scope.launch(Dispatchers.IO) {
+                    val bitmap = ImageDecoder.decodeFile(file)
                     file.delete()
+                    withContext(Dispatchers.Main) {
+                        if (bitmap != null && !bitmap.isRecycled) {
+                            onCaptured(bitmap)
+                        } else {
+                            onError()
+                        }
+                        onFinished()
+                    }
                 }
             }
         }
@@ -859,8 +882,14 @@ private fun PageManager(
 
                 val thumbnail =
                     remember(bitmap, filter) {
+                        mutableStateOf<Bitmap?>(null)
+                    }
+
+                LaunchedEffect(bitmap, filter) {
+                    thumbnail.value = withContext(Dispatchers.Default) {
                         createThumbnail(bitmap, filter)
                     }
+                }
 
                 Card(
                     modifier = Modifier.fillMaxWidth()
@@ -869,11 +898,28 @@ private fun PageManager(
                         modifier = Modifier.padding(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Image(
-                            bitmap = thumbnail.asImageBitmap(),
-                            contentDescription = "صفحة ${index + 1}",
+                        thumbnail.value?.let { currentThumbnail ->
+                            Image(
+                                bitmap = currentThumbnail.asImageBitmap(),
+                                contentDescription = "صفحة ${index + 1}",
+                                modifier = Modifier.size(70.dp, 92.dp)
+                            )
+                        } ?: Box(
                             modifier = Modifier.size(70.dp, 92.dp)
                         )
+
+                        DisposableEffect(thumbnail.value) {
+                            val bitmapToRecycle = thumbnail.value
+                            onDispose {
+                                if (
+                                    bitmapToRecycle != null &&
+                                    bitmapToRecycle !== bitmap &&
+                                    !bitmapToRecycle.isRecycled
+                                ) {
+                                    bitmapToRecycle.recycle()
+                                }
+                            }
+                        }
 
                         Spacer(
                             modifier = Modifier.width(8.dp)
@@ -1005,122 +1051,6 @@ private fun List<Bitmap>.move(
     }
 }
 
-private fun decodeBitmapSafely(
-    resolver: ContentResolver,
-    uri: Uri,
-    maxDimension: Int
-): Bitmap? {
-    return runCatching {
-        val bounds =
-            BitmapFactory.Options().apply {
-                inJustDecodeBounds = true
-            }
-
-        resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(
-                input,
-                null,
-                bounds
-            )
-        }
-
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            return@runCatching null
-        }
-
-        val sampleSize =
-            calculateSampleSize(
-                width = bounds.outWidth,
-                height = bounds.outHeight,
-                maxDimension = maxDimension
-            )
-
-        val options =
-            BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-                inMutable = false
-            }
-
-        val decoded =
-            resolver.openInputStream(uri)?.use { input ->
-                BitmapFactory.decodeStream(
-                    input,
-                    null,
-                    options
-                )
-            } ?: return@runCatching null
-
-        if (decoded.isRecycled) {
-            return@runCatching null
-        }
-
-        BitmapSizing.fit(
-            source = decoded,
-            maxDimension = maxDimension
-        )
-    }.getOrNull()
-}
-
-private fun decodeFileSafely(
-    file: File,
-    maxDimension: Int
-): Bitmap? {
-    return runCatching {
-        val bounds =
-            BitmapFactory.Options().apply {
-                inJustDecodeBounds = true
-            }
-
-        BitmapFactory.decodeFile(
-            file.absolutePath,
-            bounds
-        )
-
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            return@runCatching null
-        }
-
-        val sampleSize =
-            calculateSampleSize(
-                width = bounds.outWidth,
-                height = bounds.outHeight,
-                maxDimension = maxDimension
-            )
-
-        val options =
-            BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-                inMutable = false
-            }
-
-        BitmapFactory.decodeFile(
-            file.absolutePath,
-            options
-        )
-    }.getOrNull()
-}
-
-private fun calculateSampleSize(
-    width: Int,
-    height: Int,
-    maxDimension: Int
-): Int {
-    if (width <= 0 || height <= 0 || maxDimension <= 0) {
-        return 1
-    }
-
-    var sampleSize = 1
-    val largestDimension = maxOf(width, height)
-
-    while (largestDimension / sampleSize > maxDimension) {
-        sampleSize *= 2
-    }
-
-    return sampleSize
-}
-
 private fun currentTimestamp(): String {
     return SimpleDateFormat(
         "yyyyMMdd-HHmmss",
@@ -1145,91 +1075,6 @@ private fun sharePdf(
             "مشاركة PDF"
         )
     )
-}
-
-private object ImageProcessor {
-
-    fun process(
-        source: Bitmap,
-        mode: FilterMode
-    ): Bitmap {
-        val output =
-            source.copy(
-                Bitmap.Config.ARGB_8888,
-                false
-            )
-
-        if (
-            mode == FilterMode.ORIGINAL ||
-            mode == FilterMode.COLOR
-        ) {
-            return output
-        }
-
-        val canvas = Canvas(output)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-
-        val matrix =
-            ColorMatrix().apply {
-                setSaturation(0f)
-
-                if (mode == FilterMode.DOCUMENT) {
-                    setScale(
-                        1.15f,
-                        1.15f,
-                        1.15f,
-                        1f
-                    )
-                }
-            }
-
-        paint.colorFilter =
-            ColorMatrixColorFilter(matrix)
-
-        canvas.drawBitmap(
-            source,
-            0f,
-            0f,
-            paint
-        )
-
-        if (
-            mode == FilterMode.BLACK_WHITE ||
-            mode == FilterMode.DOCUMENT
-        ) {
-            for (y in 0 until output.height) {
-                for (x in 0 until output.width) {
-                    val pixel = output.getPixel(x, y)
-
-                    val gray =
-                        (
-                            Color.red(pixel) * 0.299f +
-                                Color.green(pixel) * 0.587f +
-                                Color.blue(pixel) * 0.114f
-                            ).toInt()
-
-                    val value =
-                        if (gray >= 170) {
-                            255
-                        } else {
-                            0
-                        }
-
-                    output.setPixel(
-                        x,
-                        y,
-                        Color.rgb(
-                            value,
-                            value,
-                            value
-                        )
-                    )
-                }
-            }
-        }
-
-        return output
-    }
 }
 
 private object PdfWriter {
