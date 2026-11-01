@@ -218,32 +218,6 @@ private fun ScanLiteApp() {
                 }
             }
 
-            fun importPdf(uri: Uri) {
-                if (isLoading) return
-                isLoading = true
-                scope.launch {
-                    val remainingSlots = (MAX_PAGES - pages.size).coerceAtLeast(0)
-                    val importedPages = if (remainingSlots == 0) {
-                        emptyList()
-                    } else {
-                        withContext(Dispatchers.IO) {
-                            PdfImporter.importPages(
-                                resolver = context.contentResolver,
-                                uri = uri,
-                                maxPages = remainingSlots
-                            )
-                        }
-                    }
-                    isLoading = false
-                    if (importedPages.isEmpty()) {
-                        snackbarHostState.showSnackbar("تعذر قراءة ملف PDF")
-                    } else {
-                        pages = pages + importedPages
-                        screen = "pages"
-                    }
-                }
-            }
-
             isLoading = false
 
             if (decodedPages.isEmpty()) {
@@ -263,6 +237,32 @@ private fun ScanLiteApp() {
                         message = "تمت إضافة ${decodedPages.size} صورة فقط لتقليل استهلاك الذاكرة"
                     )
                 }
+            }
+        }
+    }
+
+    fun importPdf(uri: Uri) {
+        if (isLoading) return
+        isLoading = true
+        scope.launch {
+            val remainingSlots = (MAX_PAGES - pages.size).coerceAtLeast(0)
+            val importedPages = if (remainingSlots == 0) {
+                emptyList()
+            } else {
+                withContext(Dispatchers.IO) {
+                    PdfImporter.importPages(
+                        resolver = context.contentResolver,
+                        uri = uri,
+                        maxPages = remainingSlots
+                    )
+                }
+            }
+            isLoading = false
+            if (importedPages.isEmpty()) {
+                snackbarHostState.showSnackbar("تعذر قراءة ملف PDF")
+            } else {
+                pages = pages + importedPages
+                screen = "pages"
             }
         }
     }
@@ -1373,29 +1373,29 @@ private fun sharePdf(
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        private fun shareLocalPdf(
-            context: Context,
-            file: File
-        ) {
-            val uri = androidx.core.content.FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.files",
-                file
-            )
-            val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/pdf"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            context.startActivity(Intent.createChooser(sendIntent, "مشاركة PDF"))
-        }
-
     context.startActivity(
         Intent.createChooser(
             sendIntent,
             "مشاركة PDF"
         )
     )
+}
+
+private fun shareLocalPdf(
+    context: Context,
+    file: File
+) {
+    val uri = androidx.core.content.FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.files",
+        file
+    )
+    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+        type = "application/pdf"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(sendIntent, "مشاركة PDF"))
 }
 
 private object PdfWriter {
