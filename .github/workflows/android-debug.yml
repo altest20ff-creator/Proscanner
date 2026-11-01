@@ -63,9 +63,10 @@ jobs:
       - name: Run instrumentation tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
-          target: google_apis
+          api-level: 30
+          target: google_atd
           arch: x86_64
+          emulator-boot-timeout: 1200
           script: |
             ./gradlew :app:connectedDebugAndroidTest \
               --no-daemon \
