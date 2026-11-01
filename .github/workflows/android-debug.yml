@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - fix/image-processing-crash
 
 permissions:
   contents: read
@@ -58,6 +59,18 @@ jobs:
           ./gradlew :app:assembleDebug \
             --no-daemon \
             --stacktrace
+
+      - name: Run instrumentation tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_atd
+          arch: x86_64
+          emulator-boot-timeout: 1200
+          script: |
+            ./gradlew :app:connectedDebugAndroidTest \
+              --no-daemon \
+              --stacktrace
 
       - name: Verify APK
         run: |

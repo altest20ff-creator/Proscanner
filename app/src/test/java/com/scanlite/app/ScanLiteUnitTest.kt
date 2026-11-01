@@ -14,4 +14,11 @@ class ScanLiteUnitTest {
     @Test fun fileNamingIsSafeAndPredictable() {
         assertEquals("ScanLite-20261025-120000.pdf", FileNaming.pdf("ScanLite", "20261025-120000"))
     }
+
+    @Test
+    fun sampleSizeUsesPowerOfTwoAndBoundsTheLargestDimension() {
+        assertEquals(4, calculateSampleSize(6400, 3200, 1600))
+        assertEquals(1, calculateSampleSize(1200, 900, 1600))
+        assertEquals(1, calculateSampleSize(0, 900, 1600))
+    }
 }
